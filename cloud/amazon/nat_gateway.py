@@ -1,0 +1,401 @@
+#!/usr/bin/python
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
+DOCUMENTATION = '''
+module: nat_gateway
+short_description: Create, delete and describe AWS Managed NAT Gateways. Requires Boto3.
+description:
+  - Creates AWS Managed NAT Gateways with option to provide EIP or
+    allocate new address.
+  - Deletes AWS Managed NAT Gateways with option to release attached EIP.
+  - Describe AWS Managed NAT Gateways, either all or with Filters
+  - This module does not support updates or tagging as it is a current
+    restriction with AWS.
+  - This module support check mode.
+version_added: "2.1"
+options:
+  describe_action:
+    description:
+      - specifies the action to be a get action, to describe existing
+        nat gateways
+    required: false
+  describe_filter:
+    description:
+      - Use in conjunction with describe_action to filter results
+      - See U(http://boto3.readthedocs.org/en/latest/reference/services/ec2.html#EC2.Client.describe_nat_gateways)
+        for possible filters. Only the Filter section is allowed in this module.
+    required: false
+  subnet_id:
+    description:
+      - Required when creating a NAT gateway.
+    required: false
+  eip_address:
+    description:
+      - An elastic IP already allocated in the AWS account to be used
+        by the NAT gateway. This address cannot already by attached to
+        another resource. If this option is not specified, an elastic IP
+        will be allocated and attached for you.
+    required: false
+  token:
+    description:
+      - A unique ASCII string up to 64 characters to identify the request.
+      - Required only for create actions.
+    required: false
+  state:
+    description:
+        - present to ensure resource is created.
+        - absent to remove resource
+    required: false
+    default: present
+    choices: [ "present", "absent"]
+  wait:
+    description:
+      - When specified, will wait for either available status for state present
+        or deleted for state absent. If release_eip is specified during state absent,
+        this will automatically be utilised.
+    required: false
+    default: no
+    choices: ["yes", "no"]
+  wait_timeout:
+    description:
+      - Used in conjunction with wait. Number of seconds to wait for status.
+        Recommended value of over 2 minutes.
+    required: false
+    default: 320
+  release_eip:
+    description:
+      - AWS Managed NAT Gateways do not release the elastic IP by default. Specify
+        this option if releasing eip is required.
+    required: false
+  nat_gateway_id:
+    description:
+      - The ID of the NAT gateway to be removed - used only for state absent
+    required: false
+author: Karen Cheng(@Etherdaemon)
+extends_documentation_fragment: aws
+'''
+
+EXAMPLES = '''
+- name: Get all existing nat gateways
+  nat_gateway:
+    describe_action: yes
+    region: ap-southeast-2
+  register: existing_nat_gateways
+
+
+- name: Get nat gateways with specific filter
+  nat_gateway:
+    describe_action: yes
+    region: ap-southeast-2
+    describe_filter:
+      subnet-id: subnet-12345678
+      state: ['available']
+  register: existing_nat_gateways
+
+
+- name: Create new nat gateway with when condition
+  nat_gateway:
+    state: present
+    subnet_id: subnet-12345678
+    eip_address: 52.1.1.1
+    token: token-12345678
+    region: ap-southeast-2
+  register: new_nat_gateway
+  when: existing_nat_gateways.result == []
+
+
+- name: Create new nat gateway and wait for available status
+  nat_gateway:
+    state: present
+    subnet_id: subnet-12345678
+    eip_address: 52.1.1.1
+    token: uniquetokenstring
+    wait: yes
+    region: ap-southeast-2
+  register: new_nat_gateway
+
+
+- name: Create new nat gateway and allocate new eip
+  nat_gateway:
+    state: present
+    subnet_id: subnet-12345678
+    token: uniquetokenstringyyy
+    wait: yes
+    region: ap-southeast-2
+  register: new_nat_gateway
+
+- name: Describe nat gateways to be removed
+  nat_gateway:
+    describe_action: yes
+    region: ap-southeast-2
+    describe_filter:
+      subnet-id: subnet-12345678
+      state: ['available']
+  register: gateways_to_remove
+
+- name: Delete nat gateway using discovered nat gateways
+  nat_gateway:
+    state: absent
+    region: ap-southeast-2
+    wait: yes
+    nat_gateway_id: "{{ item.NatGatewayId }}"
+    release_eip: yes
+  register: delete_nat_gateway_result
+  with_items: "{{ gateways_to_remove.result }}"
+
+- name: Delete nat gateway and wait for deleted status
+  nat_gateway:
+    state: absent
+    nat_gateway_id: nat-12345678
+    wait: yes
+    wait_timeout: 500
+    region: ap-southeast-2
+
+
+- name: Delete nat gateway and release EIP
+  nat_gateway:
+    state: absent
+    nat_gateway_id: nat-12345678
+    release_eip: yes
+    region: ap-southeast-2
+'''
+
+RETURN = '''
+result:
+  description: The result of the create, delete or describe action.
+  returned: success
+  type: dictionary or a list of dictionaries
+'''
+
+try:
+    import json
+    import botocore
+    import boto3
+    HAS_BOTO3 = True
+except ImportError:
+    HAS_BOTO3 = False
+
+import time
+
+
+def date_handler(obj):
+    return obj.isoformat() if hasattr(obj, 'isoformat') else obj
+
+
+def wait_for_status(client, module, nat_gateway_id, status):
+    polling_increment_secs = 15
+    max_retries = (module.params.get('wait_timeout') / polling_increment_secs)
+    status_achieved = False
+
+    for x in range(0, max_retries):
+        try:
+            nat_gateway = get_nat_gateways(client, module, nat_gateway_id)[0]
+            if nat_gateway['State'] == status:
+                status_achieved = True
+                break
+            else:
+                time.sleep(polling_increment_secs)
+        except botocore.exceptions.ClientError as e:
+            module.fail_json(msg=str(e))
+
+    return status_achieved, nat_gateway
+
+
+def get_nat_gateways(client, module, nat_gateway_id=None):
+    params = dict()
+
+    if module.params.get('describe_filter'):
+        params['Filter'] = []
+        for key, value in module.params.get('describe_filter').iteritems():
+            if isinstance(value, basestring):
+                value = [value]
+            params['Filter'].append({'Name': key, 'Values': value })
+    elif nat_gateway_id:
+        params['NatGatewayIds'] = [nat_gateway_id]
+
+    existing_gateways = json.loads(json.dumps(client.describe_nat_gateways(**params), default=date_handler))
+
+    return existing_gateways['NatGateways']
+
+
+def create_nat_gateway(client, module, allocation_id):
+    params = dict()
+    changed = False
+    params['SubnetId'] = module.params.get('subnet_id')
+    params['AllocationId'] = allocation_id
+    params['ClientToken'] = module.params.get('token')
+
+    if module.check_mode:
+        return {'changed': True, 'result': 'Would have created NAT Gateway if not in check mode'}
+
+    try:
+        changed = True
+        result = json.loads(json.dumps(client.create_nat_gateway(**params), default=date_handler))["NatGateway"]
+        if module.params.get('wait') and not module.check_mode:
+            status_achieved, result = wait_for_status(client, module, result['NatGatewayId'], 'available')
+            if not status_achieved:
+                module.fail_json(msg='Error waiting for nat gateway to become available - please check the AWS console')
+    except botocore.exceptions.ClientError as e:
+        if "IdempotentParameterMismatch" in e.message:
+            module.fail_json(msg='token is not unique, NAT Gateway does not support update')
+        else:
+            module.fail_json(msg=str(e))
+
+    return changed, result
+
+
+def setup_creation(client, module):
+    changed = False
+    if not module.params.get('subnet_id'):
+        module.fail_json(msg='subnet_id is required for creation')
+    elif not module.params.get('token'):
+        module.fail_json(msg='unique token is required for creation')
+
+    if not module.params.get('eip_address'):
+        allocation_id = allocate_eip_address(client, module)
+    else:
+        allocation_id = get_eip_address(client, module)
+
+    existing_gateways = get_nat_gateways(client, module)
+
+    gateway_found = False
+    for gateway in existing_gateways:
+        if gateway['NatGatewayAddresses'][0]['AllocationId'] == allocation_id:
+            gateway_found = True
+            if gateway['SubnetId'] == module.params.get('subnet_id'):
+                result = gateway
+            else:
+                module.fail_json(msg='Update of nat_gateway is not allowed.')
+            break
+
+    if not gateway_found:
+        changed, result = create_nat_gateway(client, module, allocation_id)
+
+    return changed, result
+
+
+def get_eip_address(client, module):
+    params = dict()
+    params['PublicIps'] = [module.params.get('eip_address')]
+    try:
+        allocation_id = client.describe_addresses(**params)['Addresses'][0]['AllocationId']
+    except botocore.exceptions.ClientError as e:
+        module.fail_json(msg=str(e))
+
+    return allocation_id
+
+
+def allocate_eip_address(client, module):
+    params = dict()
+    params['DryRun'] = module.check_mode
+    try:
+        new_eip = client.allocate_address(**params)
+    except botocore.exceptions.ClientError as e:
+        if 'DryRunOperation' in e.message:
+            new_eip = {'AllocationId': 'eip-12345678'}
+        else:
+            module.fail_json(msg=str(e))
+    return new_eip['AllocationId']
+
+
+def release_eip(client, module, allocation_id):
+    params = dict()
+    params['AllocationId'] = allocation_id
+    params['DryRun'] = module.check_mode
+    try:
+        client.release_address(**params)
+    except Exception as e:
+        if 'DryRunOperation' not in e.message:
+            module.fail_json(msg=str(e))
+
+
+def setup_removal(client, module):
+    params = dict()
+    changed = False
+    if not module.params.get('nat_gateway_id'):
+        module.fail_json(msg='nat_gateway_id is required for removal')
+    elif module.check_mode:
+        return {'changed': True, 'result': 'Would have deleted NAT Gateway if not in check mode'}
+    else:
+        params['NatGatewayId'] = module.params.get('nat_gateway_id')
+        result = client.delete_nat_gateway(**params)
+        changed = True
+
+    if module.params.get('wait') or module.params.get('release_eip'):
+        status_achieved, result = wait_for_status(client, module, params['NatGatewayId'], 'deleted')
+        if not status_achieved:
+            module.fail_json(msg='Error waiting for nat gateway to be removed - please check the AWS console')
+        if module.params.get('release_eip'):
+            release_eip(client, module, result['NatGatewayAddresses'][0]['AllocationId'])
+
+    return changed, result
+
+
+def main():
+    argument_spec = ec2_argument_spec()
+    argument_spec.update(dict(
+        describe_action=dict(type='bool', default=False, required=False),
+        describe_filter=dict(default=None, type='dict'),
+        subnet_id=dict(),
+        eip_address=dict(),
+        token=dict(),
+        state=dict(default='present', choices=['present', 'absent']),
+        wait=dict(type='bool', default=False),
+        wait_timeout=dict(type='int', default=320, required=False),
+        release_eip=dict(type='bool', default=False),
+        nat_gateway_id=dict(),
+        )
+    )
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+        supports_check_mode=True,
+        mutually_exclusive=[
+            ['describe_action', 'state'],
+        ]
+    )
+
+    # Validate Requirements
+    if not HAS_BOTO3:
+        module.fail_json(msg='json and botocore/boto3 is required.')
+
+    state = module.params.get('state').lower()
+
+    try:
+        region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
+        ec2 = boto3_conn(module, conn_type='client', resource='ec2', region=region, endpoint=ec2_url, **aws_connect_kwargs)
+    except botocore.exceptions.NoCredentialsError, e:
+        module.fail_json(msg="Can't authorize connection - "+str(e))
+
+    if not module.params.get('describe_action'):
+        #Ensure resource is present
+        if state == 'present':
+            (changed, results) = setup_creation(ec2, module)
+        else:
+            (changed, results) = setup_removal(ec2, module)
+    else:
+        changed = False
+        results = get_nat_gateways(ec2, module)
+
+    module.exit_json(changed=changed, result=results)
+
+
+# import module snippets
+from ansible.module_utils.basic import *
+from ansible.module_utils.ec2 import *
+
+if __name__ == '__main__':
+    main()
+
