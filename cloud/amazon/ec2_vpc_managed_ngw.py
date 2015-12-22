@@ -15,7 +15,7 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 DOCUMENTATION = '''
-module: nat_gateway
+module: ec2_vpc_managed_ngw
 short_description: Create, delete and describe AWS Managed NAT Gateways. Requires Boto3.
 description:
   - Creates AWS Managed NAT Gateways with option to provide EIP or
@@ -90,14 +90,14 @@ extends_documentation_fragment: aws
 
 EXAMPLES = '''
 - name: Get all existing nat gateways
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     describe_action: yes
     region: ap-southeast-2
   register: existing_nat_gateways
 
 
 - name: Get nat gateways with specific filter
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     describe_action: yes
     region: ap-southeast-2
     describe_filter:
@@ -107,7 +107,7 @@ EXAMPLES = '''
 
 
 - name: Create new nat gateway with when condition
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     state: present
     subnet_id: subnet-12345678
     eip_address: 52.1.1.1
@@ -118,7 +118,7 @@ EXAMPLES = '''
 
 
 - name: Create new nat gateway and wait for available status
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     state: present
     subnet_id: subnet-12345678
     eip_address: 52.1.1.1
@@ -129,7 +129,7 @@ EXAMPLES = '''
 
 
 - name: Create new nat gateway and allocate new eip
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     state: present
     subnet_id: subnet-12345678
     token: uniquetokenstringyyy
@@ -138,7 +138,7 @@ EXAMPLES = '''
   register: new_nat_gateway
 
 - name: Describe nat gateways to be removed
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     describe_action: yes
     region: ap-southeast-2
     describe_filter:
@@ -147,7 +147,7 @@ EXAMPLES = '''
   register: gateways_to_remove
 
 - name: Delete nat gateway using discovered nat gateways
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     state: absent
     region: ap-southeast-2
     wait: yes
@@ -157,7 +157,7 @@ EXAMPLES = '''
   with_items: "{{ gateways_to_remove.result }}"
 
 - name: Delete nat gateway and wait for deleted status
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     state: absent
     nat_gateway_id: nat-12345678
     wait: yes
@@ -166,7 +166,7 @@ EXAMPLES = '''
 
 
 - name: Delete nat gateway and release EIP
-  nat_gateway:
+  ec2_vpc_managed_ngw:
     state: absent
     nat_gateway_id: nat-12345678
     release_eip: yes
@@ -357,6 +357,7 @@ def main():
         wait_timeout=dict(type='int', default=320, required=False),
         release_eip=dict(type='bool', default=False),
         nat_gateway_id=dict(),
+        region=dict(required=True)
         )
     )
     module = AnsibleModule(
