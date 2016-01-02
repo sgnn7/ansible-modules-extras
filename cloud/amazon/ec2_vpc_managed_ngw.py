@@ -16,7 +16,7 @@
 
 DOCUMENTATION = '''
 module: ec2_vpc_managed_ngw
-short_description: Create, delete and describe AWS Managed NAT Gateways. Requires Boto3.
+short_description: Create, delete and describe AWS Managed NAT Gateways.
 description:
   - Creates AWS Managed NAT Gateways with option to provide EIP or
     allocate new address.
@@ -26,18 +26,8 @@ description:
     restriction with AWS.
   - This module support check mode.
 version_added: "2.1"
+requirements: [ boto3 ]
 options:
-  describe_action:
-    description:
-      - specifies the action to be a get action, to describe existing
-        nat gateways
-    required: false
-  describe_filter:
-    description:
-      - Use in conjunction with describe_action to filter results
-      - See U(http://boto3.readthedocs.org/en/latest/reference/services/ec2.html#EC2.Client.describe_nat_gateways)
-        for possible filters. Only the Filter section is allowed in this module.
-    required: false
   subnet_id:
     description:
       - Required when creating a NAT gateway.
@@ -48,11 +38,6 @@ options:
         by the NAT gateway. This address cannot already by attached to
         another resource. If this option is not specified, an elastic IP
         will be allocated and attached for you.
-    required: false
-  token:
-    description:
-      - A unique ASCII string up to 64 characters to identify the request.
-      - Required only for create actions.
     required: false
   state:
     description:
@@ -84,34 +69,16 @@ options:
     description:
       - The ID of the NAT gateway to be removed - used only for state absent
     required: false
-author: Karen Cheng(@Etherdaemon)
+author: Karen Cheng(@Etherdaemon), Jon Hadfield (@jonhadfield)
 extends_documentation_fragment: aws
 '''
 
 EXAMPLES = '''
-- name: Get all existing nat gateways
-  ec2_vpc_managed_ngw:
-    describe_action: yes
-    region: ap-southeast-2
-  register: existing_nat_gateways
-
-
-- name: Get nat gateways with specific filter
-  ec2_vpc_managed_ngw:
-    describe_action: yes
-    region: ap-southeast-2
-    describe_filter:
-      subnet-id: subnet-12345678
-      state: ['available']
-  register: existing_nat_gateways
-
-
 - name: Create new nat gateway with when condition
   ec2_vpc_managed_ngw:
     state: present
     subnet_id: subnet-12345678
     eip_address: 52.1.1.1
-    token: token-12345678
     region: ap-southeast-2
   register: new_nat_gateway
   when: existing_nat_gateways.result == []
@@ -122,7 +89,6 @@ EXAMPLES = '''
     state: present
     subnet_id: subnet-12345678
     eip_address: 52.1.1.1
-    token: uniquetokenstring
     wait: yes
     region: ap-southeast-2
   register: new_nat_gateway
@@ -132,21 +98,12 @@ EXAMPLES = '''
   ec2_vpc_managed_ngw:
     state: present
     subnet_id: subnet-12345678
-    token: uniquetokenstringyyy
     wait: yes
     region: ap-southeast-2
   register: new_nat_gateway
 
-- name: Describe nat gateways to be removed
-  ec2_vpc_managed_ngw:
-    describe_action: yes
-    region: ap-southeast-2
-    describe_filter:
-      subnet-id: subnet-12345678
-      state: ['available']
-  register: gateways_to_remove
 
-- name: Delete nat gateway using discovered nat gateways
+- name: Delete nat gateway using discovered nat gateways from facts module
   ec2_vpc_managed_ngw:
     state: absent
     region: ap-southeast-2
@@ -216,14 +173,7 @@ def wait_for_status(client, module, nat_gateway_id, status):
 
 def get_nat_gateways(client, module, nat_gateway_id=None):
     params = dict()
-
-    if module.params.get('describe_filter'):
-        params['Filter'] = []
-        for key, value in module.params.get('describe_filter').iteritems():
-            if isinstance(value, basestring):
-                value = [value]
-            params['Filter'].append({'Name': key, 'Values': value })
-    elif nat_gateway_id:
+    if nat_gateway_id:
         params['NatGatewayIds'] = [nat_gateway_id]
 
     existing_gateways = json.loads(json.dumps(client.describe_nat_gateways(**params), default=date_handler))
@@ -236,7 +186,6 @@ def create_nat_gateway(client, module, allocation_id):
     changed = False
     params['SubnetId'] = module.params.get('subnet_id')
     params['AllocationId'] = allocation_id
-    params['ClientToken'] = module.params.get('token')
 
     if module.check_mode:
         return {'changed': True, 'result': 'Would have created NAT Gateway if not in check mode'}
@@ -250,7 +199,7 @@ def create_nat_gateway(client, module, allocation_id):
                 module.fail_json(msg='Error waiting for nat gateway to become available - please check the AWS console')
     except botocore.exceptions.ClientError as e:
         if "IdempotentParameterMismatch" in e.message:
-            module.fail_json(msg='token is not unique, NAT Gateway does not support update')
+            module.fail_json(msg='NAT Gateway does not support update')
         else:
             module.fail_json(msg=str(e))
 
@@ -261,8 +210,6 @@ def setup_creation(client, module):
     changed = False
     if not module.params.get('subnet_id'):
         module.fail_json(msg='subnet_id is required for creation')
-    elif not module.params.get('token'):
-        module.fail_json(msg='unique token is required for creation')
 
     if not module.params.get('eip_address'):
         allocation_id = allocate_eip_address(client, module)
@@ -291,11 +238,13 @@ def get_eip_address(client, module):
     params = dict()
     params['PublicIps'] = [module.params.get('eip_address')]
     try:
-        allocation_id = client.describe_addresses(**params)['Addresses'][0]['AllocationId']
+        allocation = client.describe_addresses(**params)['Addresses'][0]
+        if not 'AllocationId' in allocation:
+            module.fail_json(msg="EIP provided is a non-VPC EIP, please allocate a VPC scoped EIP")
     except botocore.exceptions.ClientError as e:
         module.fail_json(msg=str(e))
 
-    return allocation_id
+    return allocation['Addresses'][0]['AllocationId']
 
 
 def allocate_eip_address(client, module):
@@ -347,25 +296,18 @@ def setup_removal(client, module):
 def main():
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
-        describe_action=dict(type='bool', default=False, required=False),
-        describe_filter=dict(default=None, type='dict'),
         subnet_id=dict(),
         eip_address=dict(),
-        token=dict(),
         state=dict(default='present', choices=['present', 'absent']),
         wait=dict(type='bool', default=False),
         wait_timeout=dict(type='int', default=320, required=False),
         release_eip=dict(type='bool', default=False),
         nat_gateway_id=dict(),
-        region=dict(required=True)
         )
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
-        mutually_exclusive=[
-            ['describe_action', 'state'],
-        ]
     )
 
     # Validate Requirements
@@ -377,18 +319,22 @@ def main():
     try:
         region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
         ec2 = boto3_conn(module, conn_type='client', resource='ec2', region=region, endpoint=ec2_url, **aws_connect_kwargs)
-    except botocore.exceptions.NoCredentialsError, e:
-        module.fail_json(msg="Can't authorize connection - "+str(e))
-
-    if not module.params.get('describe_action'):
-        #Ensure resource is present
-        if state == 'present':
-            (changed, results) = setup_creation(ec2, module)
+    except Exception as e:
+        # Getting around the get_aws_connection_info boto reliance for region
+        if "global name 'boto' is not defined" in e.message:
+            region = botocore.session.get_session().get_config_variable('region')
+            if not region:
+                module.fail_json(msg="Error - no region provided")
+            else:
+                region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
         else:
-            (changed, results) = setup_removal(ec2, module)
+            module.fail_json(msg="Can't authorize connection - "+str(e))
+
+    #Ensure resource is present
+    if state == 'present':
+        (changed, results) = setup_creation(ec2, module)
     else:
-        changed = False
-        results = get_nat_gateways(ec2, module)
+        (changed, results) = setup_removal(ec2, module)
 
     module.exit_json(changed=changed, result=results)
 
@@ -399,4 +345,3 @@ from ansible.module_utils.ec2 import *
 
 if __name__ == '__main__':
     main()
-
