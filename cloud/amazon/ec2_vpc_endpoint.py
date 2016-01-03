@@ -16,12 +16,13 @@
 
 DOCUMENTATION = '''
 module: ec2_vpc_endpoint
-short_description: Create and delete AWS VPC Endpoints. Requires Boto3.
+short_description: Create and delete AWS VPC Endpoints.
 description:
   - Creates AWS VPC endpoints.
   - Deletes AWS VPC endpoints.
   - This module support check mode.
 version_added: "2.1"
+requirements: [ boto3 ]
 options:
   vpc_id:
     description:
@@ -32,16 +33,6 @@ options:
       - An AWS supported vpc endpoint service. Use the ec2_vpc_endpoint_facts
         module to describe the supported endpoint services.
       - Required when creating an endpoint.
-    required: false
-  token:
-    description:
-      - A unique ASCII string up to 64 characters to identify the request.
-      - Required only for create actions.
-      - Suggest using a randomiser filter to create this token as testing of this
-        with this particular AWS action has seen that the client token does not expire
-        after deletion of the endpoint for quite some time. If you reuse a token
-        straight after deleting original endpoint you will have a very high chance of
-        being returned an error for the token not being unique.
     required: false
   policy:
     description:
@@ -80,10 +71,6 @@ options:
         is added to the route table with the destination of the endpoint if
         provided.
     required: false
-  region:
-    description:
-      - VPC endpoints are region specific and must be provided.
-    required: true
   vpc_endpoint_id:
     description:
       - One or more vpc endpoint ids to remove from the AWS account
@@ -103,10 +90,9 @@ EXAMPLES = '''
     route_table_ids:
       - rtb-12345678
       - rtb-87654321
-    token: token-12345678
   register: new_vpc_endpoint
 
-- name: Create new vpc endpoint with random client token
+- name: Create new vpc endpoint with json file
   ec2_vpc_endpoint:
     state: present
     region: ap-southeast-2
@@ -116,7 +102,6 @@ EXAMPLES = '''
     route_table_ids:
       - rtb-12345678
       - rtb-87654321
-    token: "{{ 1000 | random }}"
   register: new_vpc_endpoint
 
 - name: Delete newly created vpc endpoint
@@ -178,8 +163,6 @@ def get_endpoints(client, module, resource_id):
 def setup_creation(client, module):
     if not module.params.get('vpc_id'):
         module.fail_json(msg='vpc_id is a required paramater')
-    if not module.params.get('token'):
-        module.fail_json(msg='a unique token is a required paramater')
     if not module.params.get('service'):
         module.fail_json(msg='a valid service is a required paramater')
 
@@ -193,7 +176,6 @@ def create_vpc_endpoint(client, module):
     changed = False
     params['VpcId'] = module.params.get('vpc_id')
     params['ServiceName'] = module.params.get('service')
-    params['ClientToken'] = module.params.get('token')
     params['DryRun'] = module.check_mode
 
     if module.params.get('route_table_ids'):
@@ -221,9 +203,7 @@ def create_vpc_endpoint(client, module):
             if not status_achieved:
                 module.fail_json(msg='Error waiting for vpc endpoint to become available - please check the AWS console')
     except botocore.exceptions.ClientError as e:
-        if "IdempotentParameterMismatch" in e.message:
-            module.fail_json(msg='token is not unique, VPC Endpoint does not support update'+str(e.message))
-        elif "DryRunOperation" in e.message:
+        if "DryRunOperation" in e.message:
             changed = True
             result = 'Would have created VPC Endpoint if not in check mode'
         else:
@@ -266,13 +246,11 @@ def main():
     argument_spec.update(dict(
         vpc_id=dict(),
         service=dict(),
-        token=dict(),
         policy=dict(),
         state=dict(default='present', choices=['present', 'absent']),
         wait=dict(type='bool', default=False),
         wait_timeout=dict(type='int', default=320, required=False),
         route_table_ids=dict(type='list'),
-        region=dict(required=True),
         vpc_endpoint_id=dict(),
         )
     )
@@ -289,9 +267,20 @@ def main():
 
     try:
         region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
+    except NameError as e:
+        # Getting around the get_aws_connection_info boto reliance for region
+        if "global name 'boto' is not defined" in e.message:
+            module.params['region'] = botocore.session.get_session().get_config_variable('region')
+            if not module.params['region']:
+                module.fail_json(msg="Error - no region provided")
+        else:
+            module.fail_json(msg="Can't retrieve connection information - "+str(e))
+
+    try:
+        region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
         ec2 = boto3_conn(module, conn_type='client', resource='ec2', region=region, endpoint=ec2_url, **aws_connect_kwargs)
     except botocore.exceptions.NoCredentialsError, e:
-        module.fail_json(msg="Can't authorize connection - "+str(e))
+        module.fail_json(msg=str(e))
 
     #Ensure resource is present
     if state == 'present':
@@ -308,3 +297,4 @@ from ansible.module_utils.ec2 import *
 
 if __name__ == '__main__':
     main()
+
