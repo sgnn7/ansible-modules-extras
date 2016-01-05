@@ -244,7 +244,7 @@ def get_eip_address(client, module):
     except botocore.exceptions.ClientError as e:
         module.fail_json(msg=str(e))
 
-    return allocation['Addresses'][0]['AllocationId']
+    return allocation['AllocationId']
 
 
 def allocate_eip_address(client, module):
@@ -318,17 +318,20 @@ def main():
 
     try:
         region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
-        ec2 = boto3_conn(module, conn_type='client', resource='ec2', region=region, endpoint=ec2_url, **aws_connect_kwargs)
-    except Exception as e:
+    except NameError as e:
         # Getting around the get_aws_connection_info boto reliance for region
         if "global name 'boto' is not defined" in e.message:
-            region = botocore.session.get_session().get_config_variable('region')
-            if not region:
+            module.params['region'] = botocore.session.get_session().get_config_variable('region')
+            if not module.params['region']:
                 module.fail_json(msg="Error - no region provided")
-            else:
-                region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
         else:
-            module.fail_json(msg="Can't authorize connection - "+str(e))
+            module.fail_json(msg="Can't retrieve connection information - "+str(e))
+
+    try:
+        region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
+        ec2 = boto3_conn(module, conn_type='client', resource='ec2', region=region, endpoint=ec2_url, **aws_connect_kwargs)
+    except botocore.exceptions.NoCredentialsError, e:
+        module.fail_json(msg=str(e))
 
     #Ensure resource is present
     if state == 'present':
