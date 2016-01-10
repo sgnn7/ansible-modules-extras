@@ -23,7 +23,7 @@ description:
   - Deletes AWS Managed NAT Gateways with option to release attached EIP.
   - Describe AWS Managed NAT Gateways, either all or with Filters
   - This module does not support updates or tagging as it is a current
-    restriction with AWS.
+    restriction with AWS. It does support idempotency via the client_token.
   - This module support check mode.
 version_added: "2.1"
 requirements: [ boto3 ]
@@ -69,11 +69,26 @@ options:
     description:
       - The ID of the NAT gateway to be removed - used only for state absent
     required: false
+  client_token:
+    description:
+      - Optional unique token to be used during create to ensure idempotency. When 
+        specifying this option, ensure you specify the eip_address parameter as well
+        otherwise any subsequent runs will fail.
+    required: false
 author: Karen Cheng(@Etherdaemon), Jon Hadfield (@jonhadfield)
 extends_documentation_fragment: aws
 '''
 
 EXAMPLES = '''
+- name: Create new nat gateway with client token
+  ec2_vpc_managed_ngw:
+    state: present
+    subnet_id: subnet-12345678
+    eip_address: 52.1.1.1
+    region: ap-southeast-2
+    client_token: abcd-12345678
+  register: new_nat_gateway
+
 - name: Create new nat gateway with when condition
   ec2_vpc_managed_ngw:
     state: present
@@ -146,6 +161,7 @@ except ImportError:
     HAS_BOTO3 = False
 
 import time
+import datetime
 
 
 def date_handler(obj):
@@ -184,22 +200,30 @@ def get_nat_gateways(client, module, nat_gateway_id=None):
 def create_nat_gateway(client, module, allocation_id):
     params = dict()
     changed = False
+    token_provided = False
     params['SubnetId'] = module.params.get('subnet_id')
     params['AllocationId'] = allocation_id
+
+    if module.params.get('client_token'):
+        token_provided = True
+        request_time = datetime.datetime.utcnow()
+        params['ClientToken'] = module.params.get('client_token')
 
     if module.check_mode:
         return {'changed': True, 'result': 'Would have created NAT Gateway if not in check mode'}
 
     try:
         changed = True
-        result = json.loads(json.dumps(client.create_nat_gateway(**params), default=date_handler))["NatGateway"]
-        if module.params.get('wait') and not module.check_mode:
+        result = client.create_nat_gateway(**params)["NatGateway"]
+        if token_provided and (request_time > result['CreateTime'].replace(tzinfo=None)):
+            changed = False
+        elif module.params.get('wait') and not module.check_mode:
             status_achieved, result = wait_for_status(client, module, result['NatGatewayId'], 'available')
             if not status_achieved:
                 module.fail_json(msg='Error waiting for nat gateway to become available - please check the AWS console')
     except botocore.exceptions.ClientError as e:
         if "IdempotentParameterMismatch" in e.message:
-            module.fail_json(msg='NAT Gateway does not support update')
+            module.fail_json(msg='NAT Gateway does not support update and token has already been provided')
         else:
             module.fail_json(msg=str(e))
 
@@ -216,20 +240,22 @@ def setup_creation(client, module):
     else:
         allocation_id = get_eip_address(client, module)
 
-    existing_gateways = get_nat_gateways(client, module)
-
-    gateway_found = False
-    for gateway in existing_gateways:
-        if gateway['NatGatewayAddresses'][0]['AllocationId'] == allocation_id:
-            gateway_found = True
-            if gateway['SubnetId'] == module.params.get('subnet_id'):
-                result = gateway
-            else:
-                module.fail_json(msg='Update of nat_gateway is not allowed.')
-            break
-
-    if not gateway_found:
+    if module.params.get('client_token'):
         changed, result = create_nat_gateway(client, module, allocation_id)
+    else:
+        existing_gateways = get_nat_gateways(client, module)
+        gateway_found = False
+        for gateway in existing_gateways:
+            if gateway['NatGatewayAddresses'][0]['AllocationId'] == allocation_id:
+                gateway_found = True
+                if gateway['SubnetId'] == module.params.get('subnet_id'):
+                    result = gateway
+                else:
+                    module.fail_json(msg='Update of nat_gateway is not allowed.')
+                break
+
+        if not gateway_found:
+            changed, result = create_nat_gateway(client, module, allocation_id)
 
     return changed, result
 
@@ -303,6 +329,7 @@ def main():
         wait_timeout=dict(type='int', default=320, required=False),
         release_eip=dict(type='bool', default=False),
         nat_gateway_id=dict(),
+        client_token=dict(),
         )
     )
     module = AnsibleModule(
@@ -339,7 +366,7 @@ def main():
     else:
         (changed, results) = setup_removal(ec2, module)
 
-    module.exit_json(changed=changed, result=results)
+    module.exit_json(changed=changed, result=json.loads(json.dumps(results, default=date_handler)))
 
 
 # import module snippets
