@@ -75,6 +75,10 @@ options:
     description:
       - One or more vpc endpoint ids to remove from the AWS account
     required: false
+  client_token:
+    description:
+      - Optional client token to ensure idempotency
+    required: false
 author: Karen Cheng(@Etherdaemon)
 extends_documentation_fragment: aws
 '''
@@ -127,6 +131,7 @@ except ImportError:
     HAS_BOTO3 = False
 
 import time
+import datetime
 
 
 def date_handler(obj):
@@ -152,34 +157,57 @@ def wait_for_status(client, module, resource_id, status):
     return status_achieved, resource
 
 
-def get_endpoints(client, module, resource_id):
+def get_endpoints(client, module, resource_id=None):
     params = dict()
-    params['VpcEndpointIds'] = [resource_id]
+    if resource_id:
+        params['VpcEndpointIds'] = [resource_id]
 
     result = json.loads(json.dumps(client.describe_vpc_endpoints(**params), default=date_handler))
     return result
 
 
 def setup_creation(client, module):
+    endpoint_found = False
     if not module.params.get('vpc_id'):
         module.fail_json(msg='vpc_id is a required paramater')
+    else:
+        vpc_id = module.params.get('vpc_id')
     if not module.params.get('service'):
         module.fail_json(msg='a valid service is a required paramater')
+    else:
+        service_name = module.params.get('service')
 
-    changed, result = create_vpc_endpoint(client, module)
+    if module.params.get('route_table_ids'):
+        route_table_ids = module.params.get('route_table_ids')
+        existing_endpoints = get_endpoints(client, module)
+        for endpoint in existing_endpoints['VpcEndpoints']:
+            if endpoint['VpcId'] == vpc_id and endpoint['ServiceName'] == service_name:
+                if endpoint['RouteTableIds'] == route_table_ids:
+                    changed = False
+                    endpoint_found = True
+                    result = endpoint
 
-    return changed, result
+    if not endpoint_found:
+        changed, result = create_vpc_endpoint(client, module)
+
+    return changed, json.loads(json.dumps(result, default=date_handler))
 
 
 def create_vpc_endpoint(client, module):
     params = dict()
     changed = False
+    token_provided = False
     params['VpcId'] = module.params.get('vpc_id')
     params['ServiceName'] = module.params.get('service')
     params['DryRun'] = module.check_mode
 
     if module.params.get('route_table_ids'):
         params['RouteTableIds'] = module.params.get('route_table_ids')
+
+    if module.params.get('client_token'):
+        token_provided = True
+        request_time = datetime.datetime.utcnow()
+        params['ClientToken'] = module.params.get('client_token')
 
     if module.params.get('policy'):
         try:
@@ -196,9 +224,11 @@ def create_vpc_endpoint(client, module):
         params['PolicyDocument'] = json.dumps(policy)
 
     try:
-        result = json.loads(json.dumps(client.create_vpc_endpoint(**params), default=date_handler))['VpcEndpoint']
         changed = True
-        if module.params.get('wait') and not module.check_mode:
+        result = client.create_vpc_endpoint(**params)['VpcEndpoint']
+        if token_provided and (request_time > result['CreationTimestamp'].replace(tzinfo=None)):
+            changed = False
+        elif module.params.get('wait') and not module.check_mode:
             status_achieved, result = wait_for_status(client, module, result['VpcEndpointId'], 'available')
             if not status_achieved:
                 module.fail_json(msg='Error waiting for vpc endpoint to become available - please check the AWS console')
@@ -206,6 +236,10 @@ def create_vpc_endpoint(client, module):
         if "DryRunOperation" in e.message:
             changed = True
             result = 'Would have created VPC Endpoint if not in check mode'
+        elif "IdempotentParameterMismatch" in e.message:
+            module.fail_json(msg="IdempotentParameterMismatch - updates of endpoints are not allowed by the API")
+        elif "RouteAlreadyExists" in e.message:
+            module.fail_json(msg="RouteAlreadyExists for one of the route tables - update is not allowed by the API")
         else:
             module.fail_json(msg=str(e))
     except Exception as e:
@@ -252,6 +286,7 @@ def main():
         wait_timeout=dict(type='int', default=320, required=False),
         route_table_ids=dict(type='list'),
         vpc_endpoint_id=dict(),
+        client_token=dict(),
         )
     )
     module = AnsibleModule(
@@ -297,4 +332,3 @@ from ansible.module_utils.ec2 import *
 
 if __name__ == '__main__':
     main()
-
