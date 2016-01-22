@@ -96,6 +96,17 @@ EXAMPLES = '''
       - rtb-87654321
   register: new_vpc_endpoint
 
+- name: Create new vpc endpoint the default policy
+  ec2_vpc_endpoint:
+    state: present
+    region: ap-southeast-2
+    vpc_id: vpc-12345678
+    service: com.amazonaws.ap-southeast-2.s3
+    route_table_ids:
+      - rtb-12345678
+      - rtb-87654321
+  register: new_vpc_endpoint
+
 - name: Create new vpc endpoint with json file
   ec2_vpc_endpoint:
     state: present
@@ -145,7 +156,7 @@ def wait_for_status(client, module, resource_id, status):
 
     for x in range(0, max_retries):
         try:
-            resource = get_endpoints(client, module, resource_id)[0]
+            resource = get_endpoints(client, module, resource_id)['VpcEndpoints'][0]
             if resource['State'] == status:
                 status_achieved = True
                 break
