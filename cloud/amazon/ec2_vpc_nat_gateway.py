@@ -15,7 +15,7 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 DOCUMENTATION = '''
-module: ec2_vpc_managed_ngw
+module: ec2_vpc_nat_gateway
 short_description: Create, delete and describe AWS Managed NAT Gateways.
 description:
   - Creates AWS Managed NAT Gateways with option to provide EIP or
@@ -36,8 +36,15 @@ options:
     description:
       - An elastic IP already allocated in the AWS account to be used
         by the NAT gateway. This address cannot already by attached to
-        another resource. If this option is not specified, an elastic IP
-        will be allocated and attached for you.
+        another resource. If this option or the allocation_id is not
+        specified, an elastic IP will be allocated and attached for you.
+    required: false
+  allocation_id:
+    description:
+      - The allocation id of the EIP address. Mutually exclusive to
+        eip_address. This id cannot already by attached to
+        another resource. If this option or eip_address is not
+        specified, an elastic IP will be allocated and attached for you.
     required: false
   state:
     description:
@@ -81,7 +88,7 @@ extends_documentation_fragment: aws
 
 EXAMPLES = '''
 - name: Create new nat gateway with client token
-  ec2_vpc_managed_ngw:
+  ec2_vpc_nat_gateway:
     state: present
     subnet_id: subnet-12345678
     eip_address: 52.1.1.1
@@ -89,8 +96,16 @@ EXAMPLES = '''
     client_token: abcd-12345678
   register: new_nat_gateway
 
+- name: Create new nat gateway allocation-id
+  ec2_vpc_nat_gateway:
+    state: present
+    subnet_id: subnet-12345678
+    allocation_id: eipalloc-12345678
+    region: ap-southeast-2
+  register: new_nat_gateway
+
 - name: Create new nat gateway with when condition
-  ec2_vpc_managed_ngw:
+  ec2_vpc_nat_gateway:
     state: present
     subnet_id: subnet-12345678
     eip_address: 52.1.1.1
@@ -100,7 +115,7 @@ EXAMPLES = '''
 
 
 - name: Create new nat gateway and wait for available status
-  ec2_vpc_managed_ngw:
+  ec2_vpc_nat_gateway:
     state: present
     subnet_id: subnet-12345678
     eip_address: 52.1.1.1
@@ -110,7 +125,7 @@ EXAMPLES = '''
 
 
 - name: Create new nat gateway and allocate new eip
-  ec2_vpc_managed_ngw:
+  ec2_vpc_nat_gateway:
     state: present
     subnet_id: subnet-12345678
     wait: yes
@@ -119,7 +134,7 @@ EXAMPLES = '''
 
 
 - name: Delete nat gateway using discovered nat gateways from facts module
-  ec2_vpc_managed_ngw:
+  ec2_vpc_nat_gateway:
     state: absent
     region: ap-southeast-2
     wait: yes
@@ -129,7 +144,7 @@ EXAMPLES = '''
   with_items: "{{ gateways_to_remove.result }}"
 
 - name: Delete nat gateway and wait for deleted status
-  ec2_vpc_managed_ngw:
+  ec2_vpc_nat_gateway:
     state: absent
     nat_gateway_id: nat-12345678
     wait: yes
@@ -138,7 +153,7 @@ EXAMPLES = '''
 
 
 - name: Delete nat gateway and release EIP
-  ec2_vpc_managed_ngw:
+  ec2_vpc_nat_gateway:
     state: absent
     nat_gateway_id: nat-12345678
     release_eip: yes
@@ -235,10 +250,12 @@ def setup_creation(client, module):
     if not module.params.get('subnet_id'):
         module.fail_json(msg='subnet_id is required for creation')
 
-    if not module.params.get('eip_address'):
+    if not module.params.get('allocation_id') and not module.params.get('eip_address'):
         allocation_id = allocate_eip_address(client, module)
-    else:
+    elif module.params.get('eip_address'):
         allocation_id = get_eip_address(client, module)
+    else:
+        allocation_id = module.params.get('allocation_id')
 
     if module.params.get('client_token'):
         changed, result = create_nat_gateway(client, module, allocation_id)
@@ -276,6 +293,7 @@ def get_eip_address(client, module):
 def allocate_eip_address(client, module):
     params = dict()
     params['DryRun'] = module.check_mode
+    params['Domain'] = 'vpc'
     try:
         new_eip = client.allocate_address(**params)
     except botocore.exceptions.ClientError as e:
@@ -324,6 +342,7 @@ def main():
     argument_spec.update(dict(
         subnet_id=dict(),
         eip_address=dict(),
+        allocation_id=dict(),
         state=dict(default='present', choices=['present', 'absent']),
         wait=dict(type='bool', default=False),
         wait_timeout=dict(type='int', default=320, required=False),
@@ -335,6 +354,9 @@ def main():
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
+        mutually_exclusive=[
+            ['allocation_id', 'eip_address']
+        ]
     )
 
     # Validate Requirements
