@@ -21,7 +21,7 @@ description:
   - Creates AWS VPC endpoints.
   - Deletes AWS VPC endpoints.
   - This module support check mode.
-version_added: "2.1"
+version_added: "2.2"
 requirements: [ boto3 ]
 options:
   vpc_id:
@@ -193,7 +193,9 @@ def setup_creation(client, module):
         existing_endpoints = get_endpoints(client, module)
         for endpoint in existing_endpoints['VpcEndpoints']:
             if endpoint['VpcId'] == vpc_id and endpoint['ServiceName'] == service_name:
-                if endpoint['RouteTableIds'] == route_table_ids:
+                sorted_endpoint_rt_ids = sorted(endpoint['RouteTableIds'])
+                sorted_route_table_ids = sorted(route_table_ids)
+                if cmp(sorted_endpoint_rt_ids, sorted_route_table_ids) == 0:
                     changed = False
                     endpoint_found = True
                     result = endpoint
