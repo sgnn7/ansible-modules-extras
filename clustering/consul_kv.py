@@ -99,18 +99,16 @@ options:
           - the port on which the consul agent is running
         required: false
         default: 8500
-    scheme:
+    retrieve:
         description:
-          - the protocol scheme on which the consul agent is running
-        required: false
-        default: http
-        version_added: "2.1"
-    validate_certs:
-        description:
-          - whether to verify the tls certificate of the consul agent
+            - retrieve the index and stored data for a given key when added to consul
         required: false
         default: True
-        version_added: "2.1"
+    json:
+        description:
+          - Used for addition of key values only into consul. Importing via json file or json object.
+            Do not use with key/value inputs - these are mutually exclusive
+        required: false
 """
 
 
@@ -130,9 +128,23 @@ EXAMPLES = '''
     consul_kv:
       key: ansible/groups/dc1/somenode
       value: 'top_secret'
+
+  - name: import json file with key values into consul kv store
+    consul_kv:
+      json: "configurations/env.json"
+      host: "{{ consul_host }}"
+      state: present
+      token: "{{ environment_token }}"
+    register: import_result
+
 '''
 
 import sys
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
 
 try:
     import consul
@@ -143,14 +155,19 @@ except ImportError, e:
 
 from requests.exceptions import ConnectionError
 
-def execute(module):
 
+def execute(module):
     state = module.params.get('state')
 
     if state == 'acquire' or state == 'release':
         lock(module, state)
     if state == 'present':
-        add_value(module)
+        if module.params.get('json'):
+            changed, result = import_values(module)
+            module.exit_json(changed=changed, result=result)
+        else:
+            result = add_value(module)
+            module.exit_json(changed=result["changed"], result=result)
     else:
         remove_value(module)
 
@@ -182,28 +199,65 @@ def lock(module, state):
                      key=key)
 
 
-def add_value(module):
+def import_values(module):
+    result = list()
+    changed = False
+    try:
+        key_values = json.loads(module.params.get('json'))
+    except ValueError as e:
+        try:
+            with open(module.params.get('json'), 'r') as json_data:
+                key_values = json.load(json_data)
+                json_data.close()
+        except Exception as e:
+            module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e))
 
+    updated_dictionary = convert_dictionary(key_values)
+    for k, v in updated_dictionary.iteritems():
+        add_value_result = add_value(module, k, v)
+        if add_value_result["changed"]:
+            changed = add_value_result["changed"]
+
+        result.append(add_value_result)
+
+    return changed, result
+
+
+def convert_dictionary(input_dict, path=""):
+    new_dict = dict()
+    for k, v in input_dict.items():
+        new_key = path + k
+        if isinstance(v, dict):
+            new_dict.update(convert_dictionary(v, new_key + "/"))
+        else:
+            new_dict[new_key] = v
+    return new_dict
+
+
+def add_value(module, override_key=None, override_value=None):
+    result = dict()
+    result["changed"] = False
     consul_api = get_consul_api(module)
 
-    key = module.params.get('key')
-    value = module.params.get('value')
+    key = override_key or module.params.get('key')
+    value = override_value or module.params.get('value')
+
+    result["key"] = key
 
     index, existing = consul_api.kv.get(key)
 
     changed = not existing or (existing and existing['Value'] != value)
     if changed and not module.check_mode:
-        changed = consul_api.kv.put(key, value,
-                                    cas=module.params.get('cas'),
-                                    flags=module.params.get('flags'))
+        changed = bool(consul_api.kv.put(key, value,
+                                            cas=module.params.get('cas'),
+                                            flags=module.params.get('flags')))
 
     if module.params.get('retrieve'):
-        index, stored = consul_api.kv.get(key)
+        result["index"], result["data"] = consul_api.kv.get(key)
 
-    module.exit_json(changed=changed,
-                     index=index,
-                     key=key,
-                     data=stored)
+    return result
 
 
 def remove_value(module):
@@ -230,36 +284,41 @@ def remove_value(module):
 def get_consul_api(module, token=None):
     return consul.Consul(host=module.params.get('host'),
                          port=module.params.get('port'),
-                         scheme=module.params.get('scheme'),
-                         validate_certs=module.params.get('validate_certs'),
                          token=module.params.get('token'))
+
 
 def test_dependencies(module):
     if not python_consul_installed:
         module.fail_json(msg="python-consul required for this module. "\
               "see http://python-consul.readthedocs.org/en/latest/#installation")
-    
+
+
 def main():
 
     argument_spec = dict(
         cas=dict(required=False),
         flags=dict(required=False),
-        key=dict(required=True),
+        key=dict(required=False),
         host=dict(default='localhost'),
-        scheme=dict(required=False, default='http'),
-        validate_certs=dict(required=False, default=True),
         port=dict(default=8500, type='int'),
         recurse=dict(required=False, type='bool'),
         retrieve=dict(required=False, default=True),
         state=dict(default='present', choices=['present', 'absent']),
         token=dict(required=False, default='anonymous', no_log=True),
-        value=dict(required=False)
+        value=dict(required=False),
+        json=dict(required=False),
     )
 
-    module = AnsibleModule(argument_spec, supports_check_mode=False)
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+        supports_check_mode=False,
+        mutually_exclusive=[
+            ['json', 'key'],
+            ['json', 'value'],
+        ])
 
     test_dependencies(module)
-        
+
     try:
         execute(module)
     except ConnectionError, e:
