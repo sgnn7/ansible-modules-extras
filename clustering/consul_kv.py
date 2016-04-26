@@ -104,11 +104,13 @@ options:
             - retrieve the index and stored data for a given key when added to consul
         required: false
         default: True
+        version_added: 2.1
     json:
         description:
           - Used for addition of key values only into consul. Importing via json file or json object.
             Do not use with key/value inputs - these are mutually exclusive
         required: false
+        version_added: 2.1
 """
 
 
