@@ -184,7 +184,7 @@ def main():
         'services': get_supported_services,
         'endpoints': get_endpoints,
     }
-    results = invocations[module.params.get('query')](ec2, module)
+    results = invocations[module.params.get('query')](connection, module)
 
     module.exit_json(result=results)
 
